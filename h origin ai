@@ -1,0 +1,11 @@
+[33mcommit fac39bcfe8539ba3d40c1f670a25ba46c4711bb9[m
+Author: SHRIHARI KULKARNI <163467964+shrihari7396@users.noreply.github.com>
+Date:   Tue Dec 23 05:51:14 2025 +0000
+
+    docs: Add comprehensive documentation (API, Architecture, Contributing, Troubleshooting)
+
+ API.md             |  18 [32m+++++[m
+ ARCHITECTURE.md    | 176 [32m+++++++++++++++++++++++++++++++++++++++++++++++[m
+ CONTRIBUTING.md    | 199 [32m+++++++++++++++++++++++++++++++++++++++++++++++++++++[m
+ TROUBLESHOOTING.md | 272 [32m+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++[m
+ 4 files changed, 665 insertions(+)

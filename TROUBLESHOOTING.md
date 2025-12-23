@@ -55,7 +55,659 @@ docker exec kafka kafka-consumer-groups \
   --group delivery-group --reset-offsets --to-earliest --execute
 ```
 
-### 3. Serialization Issues
+### 3. Serialization Issuescd EndUser && cat > src/main/java/com/enduser/dtos/OrderRequest.java << 'EOF'
+package com.enduser.dtos;
+
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
+
+/**
+ * DTO for Order Request
+ * Represents an order placed by a user
+ */
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class OrderRequest {
+    private String orderId;
+    private String userId;
+    private String items;
+    private BigDecimal totalPrice;
+    private LocalDateTime timestamp;
+    private String deliveryAddress;
+    private String phoneNumber;
+
+    public OrderRequest(String orderId, String userId, String items, BigDecimal totalPrice) {
+        this.orderId = orderId;
+        this.userId = userId;
+        this.items = items;
+        this.totalPrice = totalPrice;
+        this.timestamp = LocalDateTime.now();
+    }
+}
+EOF
+
+cat > src/main/java/com/enduser/service/OrderService.java << 'EOF'
+package com.enduser.service;
+
+import com.enduser.dtos.OrderRequest;
+import com.enduser.dtos.OrderResponse;
+import com.enduser.config.AppConstants;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.support.KafkaHeaders;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.support.MessageBuilder;
+import org.springframework.stereotype.Service;
+import java.util.UUID;
+
+/**
+ * Service for handling order operations
+ * Publishes orders to Kafka topic for processing
+ */
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class OrderService {
+    private final KafkaTemplate<String, String> kafkaTemplate;
+    private final ObjectMapper objectMapper;
+
+    /**
+     * Place a new order and publish to Kafka
+     * @param orderRequest Order details
+     * @return OrderResponse with order details
+     */
+    public OrderResponse placeOrder(OrderRequest orderRequest) {
+        try {
+            log.info("Placing order for user: {}", orderRequest.getUserId());
+            
+            // Set generated fields
+            if (orderRequest.getOrderId() == null) {
+                orderRequest.setOrderId("ORD-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase());
+            }
+
+            // Convert to JSON
+            String orderJson = objectMapper.writeValueAsString(orderRequest);
+            
+            // Create Kafka message with partition key
+            Message<String> message = MessageBuilder
+                    .withPayload(orderJson)
+                    .setHeader(KafkaHeaders.TOPIC, AppConstants.ORDER_PLACED_TOPIC)
+                    .setHeader(KafkaHeaders.MESSAGE_KEY, orderRequest.getUserId())
+                    .setHeader("orderId", orderRequest.getOrderId())
+                    .setHeader("timestamp", System.currentTimeMillis())
+                    .build();
+            
+            // Send to Kafka
+            var sendResult = kafkaTemplate.send(message).get();
+            
+            log.info("Order published successfully. OrderId: {}, Topic: {}, Partition: {}, Offset: {}",
+                    orderRequest.getOrderId(),
+                    sendResult.getRecordMetadata().topic(),
+                    sendResult.getRecordMetadata().partition(),
+                    sendResult.getRecordMetadata().offset());
+            
+            // Return success response
+            OrderResponse response = OrderResponse.success(
+                    orderRequest.getOrderId(),
+                    orderRequest.getUserId(),
+                    orderRequest.getTotalPrice()
+            );
+            response.setKafkaMessageId(sendResult.getRecordMetadata().offset() + "-" + 
+                    sendResult.getRecordMetadata().partition());
+            
+            return response;
+            
+        } catch (Exception e) {
+            log.error("Error placing order", e);
+            throw new RuntimeException("Failed to place order: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Validate order request
+     * @param orderRequest Order to validate
+     * @throws IllegalArgumentException if validation fails
+     */
+    public void validateOrder(OrderRequest orderRequest) {
+        if (orderRequest == null) {
+            throw new IllegalArgumentException("Order request cannot be null");
+        }
+        if (orderRequest.getUserId() == null || orderRequest.getUserId().isEmpty()) {
+            throw new IllegalArgumentException("User ID is required");
+        }
+        if (orderRequest.getItems() == null || orderRequest.getItems().isEmpty()) {
+            throw new IllegalArgumentException("Items are required");
+        }
+        if (orderRequest.getTotalPrice() == null || orderRequest.getTotalPrice().signum() <= 0) {
+            throw new IllegalArgumentException("Total price must be greater than 0");
+        }
+    }
+}
+EOF
+cat > src/main/java/com/enduser/controller/OrderController.java << 'EOF'
+package com.enduser.controller;
+
+import com.enduser.dtos.OrderRequest;
+import com.enduser.dtos.OrderResponse;
+import com.enduser.service.OrderService;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import java.util.HashMap;
+import java.util.Map;
+
+/**
+ * REST Controller for Order operations
+ * Handles HTTP requests for order placement and retrieval
+ */
+@RestController
+@RequestMapping("/api/orders")
+@RequiredArgsConstructor
+@Slf4j
+public class OrderController {
+    private final OrderService orderService;
+
+    /**
+     * Place a new order
+     * @param orderRequest Order details
+     * @return OrderResponse with order confirmation
+     */
+    @PostMapping
+    public ResponseEntity<OrderResponse> placeOrder(@RequestBody OrderRequest orderRequest) {
+        try {
+            log.info("Received order request for user: {}", orderRequest.getUserId());
+            
+            // Validate order
+            orderService.validateOrder(orderRequest);
+            
+            // Place order and publish to Kafka
+            OrderResponse response = orderService.placeOrder(orderRequest);
+            
+            return ResponseEntity.status(HttpStatus.CREATED).body(response);
+            
+        } catch (IllegalArgumentException e) {
+            log.warn("Validation error: {}", e.getMessage());
+            return ResponseEntity.badRequest()
+                    .body(OrderResponse.error(e.getMessage()));
+        } catch (Exception e) {
+            log.error("Error placing order", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(OrderResponse.error("Internal server error: " + e.getMessage()));
+        }
+    }
+
+    /**
+     * Get order details (placeholder - actual implementation would fetch from DB)
+     * @param orderId Order ID
+     * @return Order details
+     */
+    @GetMapping("/{orderId}")
+    public ResponseEntity<Map<String, Object>> getOrder(@PathVariable String orderId) {
+        try {
+            log.info("Fetching order: {}", orderId);
+            
+            Map<String, Object> response = new HashMap<>();
+            response.put("orderId", orderId);
+            response.put("status", "PLACED");
+            response.put("message", "Order has been placed and sent for processing");
+            response.put("timestamp", System.currentTimeMillis());
+            
+            return ResponseEntity.ok(response);
+            
+        } catch (Exception e) {
+            log.error("Error fetching order", e);
+            Map<String, Object> error = new HashMap<>();
+            error.put("error", "Order not found");
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(error);
+        }
+    }
+
+    /**
+     * Health check endpoint
+     * @return Health status
+     */
+    @GetMapping("/health")
+    public ResponseEntity<Map<String, String>> health() {
+        Map<String, String> response = new HashMap<>();
+        response.put("status", "UP");
+        response.put("service", "EndUser Service");
+        response.put("timestamp", String.valueOf(System.currentTimeMillis()));
+        return ResponseEntity.ok(response);
+    }
+}
+EOF
+cat > src/main/java/com/enduser/config/AppConstants.java << 'EOF'
+package com.enduser.config;
+
+/**
+ * Application constants for EndUser service
+ */
+public class AppConstants {
+    // Kafka Topics
+    public static final String ORDER_PLACED_TOPIC = "order-placed-topic";
+    
+    // Kafka Consumer Groups
+    public static final String ORDER_CONSUMER_GROUP = "order-group";
+    
+    // Application Settings
+    public static final int KAFKA_PARTITIONS = 3;
+    public static final int KAFKA_REPLICATION_FACTOR = 1;
+    public static final long KAFKA_TIMEOUT_MS = 30000;
+    
+    // Logging
+    public static final String LOGGER_NAME = "KafkaLearning-EndUser";
+    
+    private AppConstants() {
+        // Prevent instantiation
+    }
+}
+EOF
+cat > src/main/resources/application.yml << 'EOF'
+spring:
+  application:
+    name: EndUser-Service
+  profiles:
+    active: prod
+  kafka:
+    bootstrap-servers: kafka:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      retries: 3
+      linger-ms: 10
+      batch-size: 16384
+      compression-type: snappy
+    properties:
+      linger.ms: 10
+      batch.size: 16384
+      compression.type: snappy
+
+server:
+  port: 8080
+  servlet:
+    context-path: /
+  tomcat:
+    max-threads: 100
+    min-spare-threads: 10
+
+logging:
+  level:
+    root: INFO
+    com.enduser: DEBUG
+    org.springframework.kafka: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} - %msg%n"
+  file:
+    name: logs/enduser.log
+    max-size: 10MB
+    max-history: 10
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,info
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    export:
+      simple:
+        enabled: true
+
+EOF
+cd ../DeliveryBoyApp && cat > src/main/java/com/deliveryboy/dtos/DeliveryRequest.java << 'EOF'
+package com.deliveryboy.dtos;
+
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+import java.time.LocalDateTime;
+
+/**
+ * DTO for Delivery Request
+ * Represents delivery location update
+ */
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class DeliveryRequest {
+    private String orderId;
+    private String location;
+    private String deliveryBoyId;
+    private String status;
+    private LocalDateTime timestamp;
+    private Double latitude;
+    private Double longitude;
+}
+EOF
+cat > src/main/java/com/deliveryboy/dtos/OrderMessage.java << 'EOF'
+package com.deliveryboy.dtos;
+
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
+
+/**
+ * DTO representing Order Message from Kafka topic
+ */
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class OrderMessage {
+    private String orderId;
+    private String userId;
+    private String items;
+    private BigDecimal totalPrice;
+    private LocalDateTime timestamp;
+    private String deliveryAddress;
+    private String phoneNumber;
+}
+EOF
+cat > src/main/java/com/deliveryboy/service/DeliveryService.java << 'EOF'
+package com.deliveryboy.service;
+
+import com.deliveryboy.dtos.DeliveryRequest;
+import com.deliveryboy.dtos.OrderMessage;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.support.KafkaHeaders;
+import org.springframework.messaging.handler.annotation.Header;
+import org.springframework.messaging.handler.annotation.Payload;
+import org.springframework.stereotype.Service;
+import java.util.UUID;
+
+/**
+ * Service for handling delivery operations
+ * Consumes order messages from Kafka and publishes delivery updates
+ */
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class DeliveryService {
+    private final KafkaTemplate<String, String> kafkaTemplate;
+    private final ObjectMapper objectMapper;
+    private static final String DELIVERY_UPDATES_TOPIC = "delivery-updates-topic";
+
+    /**
+     * Consume order messages from Kafka topic
+     * @param message JSON message containing order details
+     * @param partition Kafka partition
+     * @param offset Kafka offset
+     */
+    @KafkaListener(
+            topics = "order-placed-topic",
+            groupId = "delivery-group",
+            containerFactory = "kafkaListenerContainerFactory"
+    )
+    public void consumeOrder(
+            @Payload String message,
+            @Header(KafkaHeaders.RECEIVED_PARTITION_ID) int partition,
+            @Header(KafkaHeaders.OFFSET) long offset) {
+        try {
+            log.info("Received message from partition: {}, offset: {}", partition, offset);
+            
+            // Deserialize message
+            OrderMessage order = objectMapper.readValue(message, OrderMessage.class);
+            
+            log.info("Processing order: {} for user: {}", order.getOrderId(), order.getUserId());
+            
+            // Process the order
+            processOrder(order);
+            
+            // Publish delivery update
+            publishDeliveryUpdate(order);
+            
+            log.info("Order {} processed successfully", order.getOrderId());
+            
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            log.error("JSON parsing error for message. Skipping: {}", message, e);
+        } catch (Exception e) {
+            log.error("Error consuming order message", e);
+        }
+    }
+
+    /**
+     * Process the order and assign delivery
+     * @param order Order message
+     */
+    private void processOrder(OrderMessage order) {
+        try {
+            log.debug("Order processing started for orderId: {}", order.getOrderId());
+            
+            // Simulate order processing
+            Thread.sleep(100);
+            
+            log.info("Order {} assigned for delivery", order.getOrderId());
+            
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.error("Order processing interrupted", e);
+        }
+    }
+
+    /**
+     * Publish delivery update to delivery-updates-topic
+     * @param order Order details
+     */
+    private void publishDeliveryUpdate(OrderMessage order) {
+        try {
+            DeliveryRequest delivery = new DeliveryRequest();
+            delivery.setOrderId(order.getOrderId());
+            delivery.setLocation("Assigned to delivery network");
+            delivery.setDeliveryBoyId("DB-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase());
+            delivery.setStatus("ASSIGNED");
+            delivery.setTimestamp(java.time.LocalDateTime.now());
+            
+            String deliveryJson = objectMapper.writeValueAsString(delivery);
+            
+            kafkaTemplate.send(DELIVERY_UPDATES_TOPIC, order.getUserId(), deliveryJson);
+            
+            log.info("Delivery update published for order: {}", order.getOrderId());
+            
+        } catch (Exception e) {
+            log.error("Error publishing delivery update", e);
+        }
+    }
+
+    /**
+     * Update delivery location
+     * @param deliveryRequest Delivery update details
+     */
+    public void updateDeliveryLocation(DeliveryRequest deliveryRequest) {
+        try {
+            log.info("Updating delivery location for order: {}", deliveryRequest.getOrderId());
+            
+            String deliveryJson = objectMapper.writeValueAsString(deliveryRequest);
+            kafkaTemplate.send(DELIVERY_UPDATES_TOPIC, deliveryRequest.getOrderId(), deliveryJson);
+            
+            log.info("Delivery location updated for order: {}", deliveryRequest.getOrderId());
+            
+        } catch (Exception e) {
+            log.error("Error updating delivery location", e);
+            throw new RuntimeException("Failed to update delivery location", e);
+        }
+    }
+}
+EOF
+cat > src/main/java/com/deliveryboy/controller/DeliveryController.java << 'EOF'
+package com.deliveryboy.controller;
+
+import com.deliveryboy.dtos.DeliveryRequest;
+import com.deliveryboy.service.DeliveryService;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import java.util.HashMap;
+import java.util.Map;
+
+/**
+ * REST Controller for Delivery operations
+ * Handles delivery location updates and status retrieval
+ */
+@RestController
+@RequestMapping("/api/delivery")
+@RequiredArgsConstructor
+@Slf4j
+public class DeliveryController {
+    private final DeliveryService deliveryService;
+
+    /**
+     * Update delivery location
+     * @param deliveryRequest Delivery location update
+     * @return Response with update status
+     */
+    @PostMapping("/update")
+    public ResponseEntity<Map<String, Object>> updateDelivery(
+            @RequestBody DeliveryRequest deliveryRequest) {
+        try {
+            log.info("Received delivery update for order: {}", deliveryRequest.getOrderId());
+            
+            // Update delivery location
+            deliveryService.updateDeliveryLocation(deliveryRequest);
+            
+            Map<String, Object> response = new HashMap<>();
+            response.put("orderId", deliveryRequest.getOrderId());
+            response.put("status", "UPDATED");
+            response.put("location", deliveryRequest.getLocation());
+            response.put("deliveryBoyId", deliveryRequest.getDeliveryBoyId());
+            response.put("message", "Delivery location updated successfully");
+            response.put("timestamp", System.currentTimeMillis());
+            
+            return ResponseEntity.ok(response);
+            
+        } catch (Exception e) {
+            log.error("Error updating delivery", e);
+            Map<String, Object> error = new HashMap<>();
+            error.put("error", "Failed to update delivery");
+            error.put("message", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(error);
+        }
+    }
+
+    /**
+     * Get delivery status for an order
+     * @param orderId Order ID
+     * @return Delivery status
+     */
+    @GetMapping("/status/{orderId}")
+    public ResponseEntity<Map<String, Object>> getDeliveryStatus(
+            @PathVariable String orderId) {
+        try {
+            log.info("Fetching delivery status for order: {}", orderId);
+            
+            Map<String, Object> response = new HashMap<>();
+            response.put("orderId", orderId);
+            response.put("status", "IN_PROGRESS");
+            response.put("location", "On the way");
+            response.put("estimatedTime", "30 minutes");
+            response.put("timestamp", System.currentTimeMillis());
+            
+            return ResponseEntity.ok(response);
+            
+        } catch (Exception e) {
+            log.error("Error fetching delivery status", e);
+            Map<String, Object> error = new HashMap<>();
+            error.put("error", "Delivery not found");
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(error);
+        }
+    }
+
+    /**
+     * Health check endpoint
+     * @return Health status
+     */
+    @GetMapping("/health")
+    public ResponseEntity<Map<String, String>> health() {
+        Map<String, String> response = new HashMap<>();
+        response.put("status", "UP");
+        response.put("service", "DeliveryBoyApp Service");
+        response.put("timestamp", String.valueOf(System.currentTimeMillis()));
+        return ResponseEntity.ok(response);
+    }
+}
+EOF
+cat > src/main/resources/application.yml << 'EOF'
+spring:
+  application:
+    name: DeliveryBoyApp-Service
+  profiles:
+    active: prod
+  kafka:
+    bootstrap-servers: kafka:9092
+    consumer:
+      bootstrap-servers: kafka:9092
+      group-id: delivery-group
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      max-poll-records: 100
+      session-timeout-ms: 30000
+      heartbeat-interval-ms: 10000
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      retries: 3
+    listener:
+      type: batch
+      concurrency: 3
+      poll-timeout: 3000
+
+server:
+  port: 8081
+  servlet:
+    context-path: /
+  tomcat:
+    max-threads: 100
+    min-spare-threads: 10
+
+logging:
+  level:
+    root: INFO
+    com.deliveryboy: DEBUG
+    org.springframework.kafka: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} - %msg%n"
+  file:
+    name: logs/deliveryboy.log
+    max-size: 10MB
+    max-history: 10
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,info
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    export:
+      simple:
+        enabled: true
+
+EOF
+
+git status
+git diff --cached
+ls -la EndUser/src/main/java/com/enduser/dtos/
+
 
 #### Problem: Serialization error when sending messages
 ```
